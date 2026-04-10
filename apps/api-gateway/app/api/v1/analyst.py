@@ -8,16 +8,8 @@ from app.schemas.auth import UserResponse
 from collections import Counter
 import time
 import re
-
-# Lazy-loaded — only initialized on first /analyst/ask request
-_embedding_model = None
-
-def get_embedding_model():
-    global _embedding_model
-    if _embedding_model is None:
-        from sentence_transformers import SentenceTransformer
-        _embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-    return _embedding_model
+# Reuse the same HuggingFace API embedding helper from notes service
+from app.services.notes import get_embedding
 
 router = APIRouter(prefix="/analyst", tags=["analyst"])
 
@@ -284,9 +276,9 @@ async def ask_analyst(
     """Local AI Data Analyst — semantic vector search + knowledge graph + smart RAG"""
     start = time.time()
     
-    # 1. Semantic vector search
-    query_embedding = get_embedding_model().encode(request.query)
-    embedding_str = '[' + ','.join(map(str, query_embedding.tolist())) + ']'
+    # 1. Semantic vector search via HuggingFace API
+    query_embedding = get_embedding(request.query)
+    embedding_str = '[' + ','.join(map(str, query_embedding)) + ']'
     
     search_query = '''
         SELECT id, user_id, content, tags, created_at,

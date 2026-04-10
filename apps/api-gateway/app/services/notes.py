@@ -1,26 +1,40 @@
 import asyncpg
 import uuid
+import os
+import requests
 from typing import List, Optional
 from app.schemas.notes import NoteCreate, NoteUpdate, NoteResponse
 
-# Lazy-load the embedding model — only loaded on first use, not at startup.
-# This keeps memory usage low on the free Render tier (512MB).
-_embedding_model = None
+# Embedding via HuggingFace Inference API — zero local memory, same 384-dim model.
+# Optionally set HF_API_TOKEN env var for higher rate limits.
+_HF_API_URL = "https://api-inference.huggingface.co/pipeline/feature-extraction/sentence-transformers/all-MiniLM-L6-v2"
 
-def get_embedding_model():
-    global _embedding_model
-    if _embedding_model is None:
-        from sentence_transformers import SentenceTransformer
-        _embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-    return _embedding_model
+def get_embedding(text: str) -> list:
+    """Call HuggingFace Inference API to get a 384-dim embedding vector."""
+    headers = {}
+    token = os.environ.get("HF_API_TOKEN", "")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    resp = requests.post(
+        _HF_API_URL,
+        headers=headers,
+        json={"inputs": text[:512], "options": {"wait_for_model": True}},
+        timeout=30
+    )
+    resp.raise_for_status()
+    result = resp.json()
+    # HF returns [[...]] for batch or [...] for single
+    if isinstance(result[0], list):
+        return result[0]
+    return result
 
 class NotesService:
     @staticmethod
     async def create_note(conn: asyncpg.Connection, neo4j_session, user_id: uuid.UUID, note_data: NoteCreate) -> NoteResponse:
-        # Generate embedding (model is lazy-loaded on first use)
-        embedding = get_embedding_model().encode(note_data.content)
-        # Format as PostgreSQL vector
-        embedding_str = '[' + ','.join(map(str, embedding.tolist())) + ']'
+        # Generate embedding via HuggingFace API
+        embedding = get_embedding(note_data.content)
+        # HF API returns a plain list, no .tolist() needed
+        embedding_str = '[' + ','.join(map(str, embedding)) + ']'
         
         # Simpler query without type casting
         query = '''
@@ -59,9 +73,9 @@ class NotesService:
     
     @staticmethod
     async def search_notes(conn: asyncpg.Connection, query_text: str, user_id: uuid.UUID, limit: int = 10) -> List[NoteResponse]:
-        # Generate query embedding (model is lazy-loaded on first use)
-        query_embedding = get_embedding_model().encode(query_text)
-        embedding_str = '[' + ','.join(map(str, query_embedding.tolist())) + ']'
+        # Generate query embedding via HuggingFace API
+        query_embedding = get_embedding(query_text)
+        embedding_str = '[' + ','.join(map(str, query_embedding)) + ']'
         
         # Search with cosine distance
         search_query = '''
@@ -149,9 +163,9 @@ class NotesService:
         param_count = 1
         
         if note_data.content is not None:
-            # Generate new embedding if content changed (model is lazy-loaded on first use)
-            embedding = get_embedding_model().encode(note_data.content)
-            embedding_str = '[' + ','.join(map(str, embedding.tolist())) + ']'
+            # Generate new embedding via HuggingFace API
+            embedding = get_embedding(note_data.content)
+            embedding_str = '[' + ','.join(map(str, embedding)) + ']'
             updates.append(f"content = ${param_count}")
             params.append(note_data.content)
             param_count += 1

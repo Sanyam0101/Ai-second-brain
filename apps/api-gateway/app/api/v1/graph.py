@@ -1,4 +1,4 @@
-﻿from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import List, Dict, Any
 from app.deps.database import get_neo4j_session
 from app.deps.auth import get_current_user
@@ -87,27 +87,22 @@ async def get_all_graph(
     session = Depends(get_neo4j_session)
 ):
     """Fetch nodes and edges for frontend graph visualization"""
-    # Only get ideas belonging to current user and their connected tags
-    q_nodes = """
-    MATCH (i:Idea {user_id: $uid})
-    OPTIONAL MATCH (i)-[r]-(t:Tag)
-    WITH collect(i) + collect(t) as raw_nodes
-    UNWIND raw_nodes as n
-    WITH DISTINCT n
-    WHERE n IS NOT NULL
-    RETURN id(n) as internal_id, labels(n)[0] as label, n.id as id, n.title as title, n.name as name LIMIT 300
-    """
-    
-    # Only get edges connected to current user's ideas
-    q_edges = """
-    MATCH (a:Idea {user_id: $uid})-[r]-(b)
-    RETURN id(a) as source, id(b) as target, type(r) as type LIMIT 500
-    """
     try:
-        nodes_result = await session.run(q_nodes, uid=str(current_user.id))
-        edges_result = await session.run(q_edges, uid=str(current_user.id))
-        
-        nodes, edges = [], []
+        # Fetch nodes
+        nodes_result = await session.run(
+            """
+            MATCH (i:Idea {user_id: $uid})
+            OPTIONAL MATCH (i)-[r]-(t:Tag)
+            WITH collect(i) + collect(t) as raw_nodes
+            UNWIND raw_nodes as n
+            WITH DISTINCT n WHERE n IS NOT NULL
+            RETURN id(n) as internal_id, labels(n)[0] as label,
+                   n.id as id, n.title as title, n.name as name
+            LIMIT 300
+            """,
+            uid=str(current_user.id)
+        )
+        nodes = []
         async for rec in nodes_result:
             nodes.append({
                 "internal_id": rec["internal_id"],
@@ -115,14 +110,24 @@ async def get_all_graph(
                 "id": rec["id"],
                 "title": rec["title"] or rec["name"]
             })
-            
+
+        # Fetch edges in a separate sequential call (not concurrent)
+        edges_result = await session.run(
+            """
+            MATCH (a:Idea {user_id: $uid})-[r]-(b)
+            RETURN id(a) as source, id(b) as target, type(r) as type
+            LIMIT 500
+            """,
+            uid=str(current_user.id)
+        )
+        edges = []
         async for rec in edges_result:
             edges.append({
                 "source": rec["source"],
                 "target": rec["target"],
                 "type": rec["type"]
             })
-            
+
         return {"nodes": nodes, "edges": edges}
     except Exception as e:
-        raise HTTPException(500, f"Error fetching graph data for visualization: {e}")
+        raise HTTPException(500, f"Error fetching graph data: {e}")

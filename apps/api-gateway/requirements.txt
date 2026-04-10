@@ -14,11 +14,3 @@ pdfplumber==0.11.4
 python-docx==1.1.2
 requests==2.32.5
 starlette==0.47.3
-
-# Slim AI stack: CPU-only torch avoids downloading the huge GPU build (~800MB saved)
-# numpy must be <2 because torch 2.2.2 was compiled against NumPy 1.x
---extra-index-url https://download.pytorch.org/whl/cpu
-numpy<2
-torch==2.2.2+cpu
-sentence-transformers==2.7.0
-transformers==4.40.0
