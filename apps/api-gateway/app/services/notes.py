@@ -1,18 +1,24 @@
-﻿import asyncpg
+import asyncpg
 import uuid
 from typing import List, Optional
-from sentence_transformers import SentenceTransformer
-import json
 from app.schemas.notes import NoteCreate, NoteUpdate, NoteResponse
 
-# Load embedding model
-embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+# Lazy-load the embedding model — only loaded on first use, not at startup.
+# This keeps memory usage low on the free Render tier (512MB).
+_embedding_model = None
+
+def get_embedding_model():
+    global _embedding_model
+    if _embedding_model is None:
+        from sentence_transformers import SentenceTransformer
+        _embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+    return _embedding_model
 
 class NotesService:
     @staticmethod
     async def create_note(conn: asyncpg.Connection, neo4j_session, user_id: uuid.UUID, note_data: NoteCreate) -> NoteResponse:
-        # Generate embedding
-        embedding = embedding_model.encode(note_data.content)
+        # Generate embedding (model is lazy-loaded on first use)
+        embedding = get_embedding_model().encode(note_data.content)
         # Format as PostgreSQL vector
         embedding_str = '[' + ','.join(map(str, embedding.tolist())) + ']'
         
@@ -53,8 +59,8 @@ class NotesService:
     
     @staticmethod
     async def search_notes(conn: asyncpg.Connection, query_text: str, user_id: uuid.UUID, limit: int = 10) -> List[NoteResponse]:
-        # Generate query embedding  
-        query_embedding = embedding_model.encode(query_text)
+        # Generate query embedding (model is lazy-loaded on first use)
+        query_embedding = get_embedding_model().encode(query_text)
         embedding_str = '[' + ','.join(map(str, query_embedding.tolist())) + ']'
         
         # Search with cosine distance
@@ -143,8 +149,8 @@ class NotesService:
         param_count = 1
         
         if note_data.content is not None:
-            # Generate new embedding if content changed
-            embedding = embedding_model.encode(note_data.content)
+            # Generate new embedding if content changed (model is lazy-loaded on first use)
+            embedding = get_embedding_model().encode(note_data.content)
             embedding_str = '[' + ','.join(map(str, embedding.tolist())) + ']'
             updates.append(f"content = ${param_count}")
             params.append(note_data.content)
