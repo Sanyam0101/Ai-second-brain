@@ -1,4 +1,5 @@
-﻿import asyncpg
+import asyncpg
+import uuid
 from neo4j import AsyncSession
 from typing import List, Dict, Any
 from datetime import datetime, timedelta
@@ -38,22 +39,30 @@ class AnalyticsService:
     ) -> SystemStats:
         """Get basic system statistics"""
         
+        user_uuid = uuid.UUID(str(user_id))
+
         # PostgreSQL queries
-        notes_count = await pg_conn.fetchval("SELECT COUNT(*) FROM notes WHERE user_id = $1", user_id)
-        unique_users = await pg_conn.fetchval("SELECT COUNT(DISTINCT user_id) FROM notes WHERE user_id = $1", user_id)
-        
-        # Neo4j queries
-        ideas_result = await neo4j_session.run("MATCH (i:Idea {user_id: $uid}) RETURN count(i) as count", uid=str(user_id))
-        ideas_record = await ideas_result.single()
-        ideas_count = ideas_record['count'] if ideas_record else 0
-        
-        connections_result = await neo4j_session.run("MATCH (a:Idea {user_id: $uid})-[r]->() RETURN count(r) as count", uid=str(user_id))
-        connections_record = await connections_result.single()
-        connections_count = connections_record['count'] if connections_record else 0
-        
-        tags_result = await neo4j_session.run("MATCH (i:Idea {user_id: $uid})-[:TAGGED_WITH]->(t:Tag) RETURN count(DISTINCT t) as count", uid=str(user_id))
-        tags_record = await tags_result.single()
-        tags_count = tags_record['count'] if tags_record else 0
+        notes_count = await pg_conn.fetchval("SELECT COUNT(*) FROM notes WHERE user_id = $1", user_uuid)
+        unique_users = await pg_conn.fetchval("SELECT COUNT(DISTINCT user_id) FROM notes WHERE user_id = $1", user_uuid)
+
+        # Neo4j queries — wrapped in try/except so a slow Neo4j doesn't crash analytics
+        ideas_count = 0
+        connections_count = 0
+        tags_count = 0
+        try:
+            ideas_result = await neo4j_session.run("MATCH (i:Idea {user_id: $uid}) RETURN count(i) as count", uid=str(user_id))
+            ideas_record = await ideas_result.single()
+            ideas_count = ideas_record['count'] if ideas_record else 0
+
+            connections_result = await neo4j_session.run("MATCH (a:Idea {user_id: $uid})-[r]->() RETURN count(r) as count", uid=str(user_id))
+            connections_record = await connections_result.single()
+            connections_count = connections_record['count'] if connections_record else 0
+
+            tags_result = await neo4j_session.run("MATCH (i:Idea {user_id: $uid})-[:TAGGED_WITH]->(t:Tag) RETURN count(DISTINCT t) as count", uid=str(user_id))
+            tags_record = await tags_result.single()
+            tags_count = tags_record['count'] if tags_record else 0
+        except Exception:
+            pass
         
         return SystemStats(
             total_notes=notes_count or 0,
@@ -67,15 +76,15 @@ class AnalyticsService:
     async def _get_activity_metrics(pg_conn: asyncpg.Connection, user_id: str) -> ActivityMetrics:
         """Get recent activity metrics"""
         
-        # Last 24 hours activity
+        user_uuid = uuid.UUID(str(user_id))
         yesterday = datetime.utcnow() - timedelta(days=1)
-        
+
         recent_notes = await pg_conn.fetchval(
-            "SELECT COUNT(*) FROM notes WHERE user_id = $1 AND created_at > $2", user_id, yesterday
+            "SELECT COUNT(*) FROM notes WHERE user_id = $1 AND created_at > $2", user_uuid, yesterday
         )
-        
+
         last_activity = await pg_conn.fetchval(
-            "SELECT MAX(created_at) FROM notes WHERE user_id = $1", user_id
+            "SELECT MAX(created_at) FROM notes WHERE user_id = $1", user_uuid
         )
         
         return ActivityMetrics(
@@ -89,8 +98,8 @@ class AnalyticsService:
     async def _get_tag_analytics(pg_conn: asyncpg.Connection, user_id: str) -> List[TagAnalytics]:
         """Get tag usage analytics"""
         
-        # Get total notes for percentage calculation
-        total_notes = await pg_conn.fetchval("SELECT COUNT(*) FROM notes WHERE user_id = $1", user_id)
+        user_uuid = uuid.UUID(str(user_id))
+        total_notes = await pg_conn.fetchval("SELECT COUNT(*) FROM notes WHERE user_id = $1", user_uuid)
         if not total_notes:
             return []
             
@@ -107,7 +116,7 @@ class AnalyticsService:
             LIMIT 10
         '''
         
-        rows = await pg_conn.fetch(tag_query, user_id)
+        rows = await pg_conn.fetch(tag_query, user_uuid)
         
         return [
             TagAnalytics(

@@ -1,4 +1,4 @@
-﻿from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
 import asyncpg
 import uuid
 from typing import List, Optional
@@ -95,13 +95,19 @@ async def upload_file_as_note(
         raise HTTPException(status_code=400, detail="File too large (max 10MB)")
     
     extracted_text = extract_text_from_file(file.filename, content)
-    
+
+    # Truncate to 4000 chars to keep embedding generation within memory limits
+    # on the free Render tier (512MB RAM)
+    MAX_CHARS = 4000
+    if len(extracted_text) > MAX_CHARS:
+        extracted_text = extracted_text[:MAX_CHARS] + "\n\n[... content truncated for embedding ...]"
+
     # Auto-generate tags from file type
     tag_list = [t.strip() for t in tags.split(',') if t.strip()] if tags else []
     tag_list.append(ext.replace('.', ''))  # Add file extension as tag
     tag_list.append('uploaded')
     tag_list = list(set(tag_list))
-    
+
     # Prefix with filename for context
     full_content = f"📄 {file.filename}\n\n{extracted_text}"
     
