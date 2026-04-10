@@ -59,10 +59,7 @@ async def neighbors(idea_id: str, depth: int = Query(2, ge=1, le=4), current_use
     """
     try:
         result = await session.run(q, id=idea_id, uid=str(current_user.id))
-        # Correct async consumption
-        records = []
-        async for record in result:
-            records.append(dict(record))
+        records = await result.data()
         return {"count": len(records), "nodes": records}
     except Exception as e:
         raise HTTPException(500, f"Error reading neighbors: {e}")
@@ -88,7 +85,8 @@ async def get_all_graph(
 ):
     """Fetch nodes and edges for frontend graph visualization"""
     try:
-        # Fetch nodes
+        # Use elementId() for Neo4j 5.x (AuraDB) compatibility
+        # Fully consume result with .data() before running second query
         nodes_result = await session.run(
             """
             MATCH (i:Idea {user_id: $uid})
@@ -96,37 +94,41 @@ async def get_all_graph(
             WITH collect(i) + collect(t) as raw_nodes
             UNWIND raw_nodes as n
             WITH DISTINCT n WHERE n IS NOT NULL
-            RETURN id(n) as internal_id, labels(n)[0] as label,
+            RETURN elementId(n) as internal_id, labels(n)[0] as label,
                    n.id as id, n.title as title, n.name as name
             LIMIT 300
             """,
             uid=str(current_user.id)
         )
-        nodes = []
-        async for rec in nodes_result:
-            nodes.append({
+        nodes_data = await nodes_result.data()
+        nodes = [
+            {
                 "internal_id": rec["internal_id"],
                 "label": rec["label"],
                 "id": rec["id"],
                 "title": rec["title"] or rec["name"]
-            })
+            }
+            for rec in nodes_data
+        ]
 
-        # Fetch edges in a separate sequential call (not concurrent)
+        # Second query only after first is fully consumed
         edges_result = await session.run(
             """
             MATCH (a:Idea {user_id: $uid})-[r]-(b)
-            RETURN id(a) as source, id(b) as target, type(r) as type
+            RETURN elementId(a) as source, elementId(b) as target, type(r) as type
             LIMIT 500
             """,
             uid=str(current_user.id)
         )
-        edges = []
-        async for rec in edges_result:
-            edges.append({
+        edges_data = await edges_result.data()
+        edges = [
+            {
                 "source": rec["source"],
                 "target": rec["target"],
                 "type": rec["type"]
-            })
+            }
+            for rec in edges_data
+        ]
 
         return {"nodes": nodes, "edges": edges}
     except Exception as e:

@@ -1,34 +1,31 @@
 import asyncpg
 import uuid
-import os
-import requests
+import hashlib
+import math
 from typing import List, Optional
 from app.schemas.notes import NoteCreate, NoteUpdate, NoteResponse
 
-# Embedding via HuggingFace Inference API — zero local memory, same 384-dim model.
-# Optionally set HF_API_TOKEN env var for higher rate limits.
-_HF_API_URL = "https://api-inference.huggingface.co/models/sentence-transformers/all-MiniLM-L6-v2"
+# Pure-Python hashing embedding — zero external dependencies, always works.
+# Uses character n-gram + word-level hashing to produce a stable 384-dim vector.
+_DIM = 384
 
 def get_embedding(text: str) -> list:
-    """Call HuggingFace Inference API to get a 384-dim embedding vector."""
-    headers = {"Content-Type": "application/json"}
-    token = os.environ.get("HF_API_TOKEN", "")
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    resp = requests.post(
-        _HF_API_URL,
-        headers=headers,
-        json={"inputs": text[:512]},
-        timeout=30
-    )
-    resp.raise_for_status()
-    result = resp.json()
-    # HF /models/ endpoint returns [[...]] for sentence-transformers
-    if isinstance(result, list) and len(result) > 0:
-        if isinstance(result[0], list):
-            return result[0]  # [[0.1, ...]] -> [0.1, ...]
-        return result          # [0.1, ...] -> already flat
-    raise ValueError(f"Unexpected HF embedding response: {type(result)}")
+    """Generate a stable 384-dim l2-normalized n-gram hashing embedding."""
+    text = text.lower()[:1000]
+    vec = [0.0] * _DIM
+    tokens = text.split()
+    # word unigrams + character trigrams for good coverage
+    features = tokens + [text[i:i+3] for i in range(len(text) - 2)]
+    for feat in features:
+        digest = hashlib.md5(feat.encode()).digest()
+        # use all 16 bytes to spread signal across dimensions
+        for i in range(0, 16, 2):
+            idx = ((digest[i] << 8) | digest[i + 1]) % _DIM
+            sign = 1 if digest[i] & 1 else -1
+            vec[idx] += sign
+    # L2-normalize so cosine similarity works correctly
+    norm = math.sqrt(sum(v * v for v in vec)) or 1.0
+    return [v / norm for v in vec]
 
 class NotesService:
     @staticmethod
