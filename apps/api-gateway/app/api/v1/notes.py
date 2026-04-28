@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File,
 import asyncpg
 import uuid
 from typing import List, Optional
-from app.deps.database import get_db_connection, get_neo4j_session
+from app.deps.database import get_db_connection
 from app.deps.auth import get_current_user
 from app.schemas.notes import NoteCreate, NoteUpdate, NoteResponse
 from app.schemas.auth import UserResponse
@@ -59,12 +59,11 @@ def extract_text_from_file(filename: str, content: bytes) -> str:
 async def create_note(
     note_data: NoteCreate,
     current_user: UserResponse = Depends(get_current_user),
-    conn: asyncpg.Connection = Depends(get_db_connection),
-    neo4j_session = Depends(get_neo4j_session)
+    conn: asyncpg.Connection = Depends(get_db_connection)
 ):
     """Create a new note"""
     try:
-        return await NotesService.create_note(conn, neo4j_session, current_user.id, note_data)
+        return await NotesService.create_note(conn, current_user.id, note_data)
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
@@ -76,8 +75,7 @@ async def upload_file_as_note(
     file: UploadFile = File(...),
     tags: Optional[str] = Form(""),
     current_user: UserResponse = Depends(get_current_user),
-    conn: asyncpg.Connection = Depends(get_db_connection),
-    neo4j_session = Depends(get_neo4j_session)
+    conn: asyncpg.Connection = Depends(get_db_connection)
 ):
     """Upload a file (PDF, CSV, TXT, MD, DOCX) and create a note from its content"""
     if not file.filename:
@@ -114,7 +112,7 @@ async def upload_file_as_note(
     note_data = NoteCreate(content=full_content, tags=tag_list)
     
     try:
-        return await NotesService.create_note(conn, neo4j_session, current_user.id, note_data)
+        return await NotesService.create_note(conn, current_user.id, note_data)
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -181,12 +179,11 @@ async def update_note(
     note_id: uuid.UUID,
     note_data: NoteUpdate,
     current_user: UserResponse = Depends(get_current_user),
-    conn: asyncpg.Connection = Depends(get_db_connection),
-    neo4j_session=Depends(get_neo4j_session)
+    conn: asyncpg.Connection = Depends(get_db_connection)
 ):
     """Update a note"""
     try:
-        note = await NotesService.update_note(conn, neo4j_session, note_id, current_user.id, note_data)
+        note = await NotesService.update_note(conn, note_id, current_user.id, note_data)
         if not note:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -205,12 +202,11 @@ async def update_note(
 async def delete_note(
     note_id: uuid.UUID,
     current_user: UserResponse = Depends(get_current_user),
-    conn: asyncpg.Connection = Depends(get_db_connection),
-    neo4j_session=Depends(get_neo4j_session)
+    conn: asyncpg.Connection = Depends(get_db_connection)
 ):
     """Delete a note"""
     try:
-        deleted = await NotesService.delete_note(conn, neo4j_session, note_id, current_user.id)
+        deleted = await NotesService.delete_note(conn, note_id, current_user.id)
         if not deleted:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,

@@ -33,8 +33,7 @@ function extractTitle(content: string): string {
     [/^Connected to\s*(.+?)(?:\n|$)/i, '$1'],
     [/^DOCX file:\s*(.+?)(?:\n|$)/i, '$1'],
     [/^PDF file:\s*(.+?)(?:\n|$)/i, '$1'],
-    [/^Notion:\s*(.+?)(?:\n|$)/i, '$1'],
-    [/^Notion page:\s*(.+?)(?:\n|$)/i, '$1'],
+    [/^Notion[:\s]*(.+?)(?:\n|$)/i, '$1'],
   ]
 
   for (const [pattern] of patterns) {
@@ -44,8 +43,11 @@ function extractTitle(content: string): string {
     }
   }
 
-  // Fallback: first meaningful line, cleaned
-  const lines = text.split('\n').filter(l => l.trim().length > 3)
+  // Fallback: first meaningful line, skipping generic markers
+  const lines = text.split('\n')
+    .map(l => l.trim())
+    .filter(l => l.length > 3 && !/^\(imported\)$|^\(uploaded\)$/i.test(l))
+  
   if (lines.length > 0) {
     const title = stripMarkup(lines[0]).slice(0, 80)
     if (title.length > 0) return title

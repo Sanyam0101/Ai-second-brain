@@ -72,6 +72,17 @@ const SOURCES = [
         urlPattern: /./,
         urlError: '',
     },
+    {
+        id: 'web', name: 'Web Scraper', icon: ExternalLink, color: '#2563EB',
+        desc: 'Scrape content from any public URL',
+        hint: 'Paste any public website URL',
+        placeholder: 'https://example.com/article',
+        gradient: 'from-blue-500 to-indigo-700',
+        bgGlow: 'group-hover:shadow-blue-500/20',
+        features: ['Extracts readable text', 'Removes scripts and styling', 'Supports HTTP/HTTPS'],
+        urlPattern: /^https?:\/\//,
+        urlError: 'Must be a valid HTTP or HTTPS URL',
+    },
 ]
 
 export default function Integrations() {

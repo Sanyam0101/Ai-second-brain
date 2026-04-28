@@ -1,5 +1,5 @@
-﻿from fastapi import APIRouter, Depends, HTTPException
-from app.deps.database import get_db_connection, get_neo4j_session
+from fastapi import APIRouter, Depends, HTTPException
+from app.deps.database import get_db_connection
 from app.schemas.graphrag import GraphRAGRequest, GraphRAGResponse, VectorResult
 import uuid
 from typing import List
@@ -18,8 +18,7 @@ async def graphrag_health():
 @router.post("/search")
 async def hybrid_search_simple(
     request: GraphRAGRequest,
-    pg_conn = Depends(get_db_connection),
-    neo4j_session = Depends(get_neo4j_session)
+    pg_conn = Depends(get_db_connection)
 ):
     """
     Simplified GraphRAG search - just return basic structure for now

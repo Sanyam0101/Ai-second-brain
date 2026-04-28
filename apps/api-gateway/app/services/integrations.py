@@ -4,12 +4,58 @@ import requests
 import asyncio
 import re
 from datetime import datetime
+from bs4 import BeautifulSoup
 from typing import List, Optional
 from app.schemas.integrations import IntegrationResponse
 from app.schemas.notes import NoteCreate
 from app.services.notes import NotesService
 
 class IntegrationsService:
+    @staticmethod
+    def _clean_text(text: str) -> str:
+        """Clean up raw text from scraper"""
+        # Remove multiple newlines/spaces
+        text = re.sub(r'\n+', '\n', text)
+        text = re.sub(r' +', ' ', text)
+        # Remove boilerplate common in web pages
+        boilerplate = [
+            r'Cookie Policy', r'Privacy Policy', r'Terms of Service', 
+            r'All rights reserved', r'Contact Us', r'Login / Signup'
+        ]
+        for p in boilerplate:
+            text = re.sub(p, '', text, flags=re.IGNORECASE)
+        return text.strip()
+
+    @staticmethod
+    def _extract_tags(text: str, existing_tags: List[str] = None) -> List[str]:
+        """Extract meaningful tags from content using heuristics"""
+        tags = set(existing_tags or [])
+        lower_text = text.lower()
+        
+        # Simple but effective keyword mapping
+        keyword_map = {
+            "research": ["research", "study", "analysis", "paper", "investigation"],
+            "development": ["code", "programming", "software", "dev", "git", "api"],
+            "marketing": ["marketing", "sales", "brand", "advertising", "customer"],
+            "project": ["project", "roadmap", "milestone", "planning"],
+            "meeting": ["meeting", "sync", "discussion", "agenda", "call"],
+            "personal": ["journal", "thought", "idea", "diary"],
+            "tech": ["ai", "machine learning", "cloud", "data", "infrastructure"],
+            "finance": ["budget", "finance", "cost", "investment", "revenue"]
+        }
+        
+        for tag, keywords in keyword_map.items():
+            if any(k in lower_text for k in keywords):
+                tags.add(tag)
+        
+        # Extract specific capitalized terms as potential tags
+        found_entities = re.findall(r'\b[A-Z][a-z]{3,}\b', text)
+        for entity in found_entities[:5]:
+            if entity.lower() not in ["the", "this", "that", "from", "with"]:
+                tags.add(entity.lower())
+                
+        return list(tags)
+
     @staticmethod
     async def connect_integration(conn: asyncpg.Connection, user_id: uuid.UUID, platform: str, token: str) -> None:
         query = '''
@@ -181,11 +227,39 @@ class IntegrationsService:
         try:
             res = requests.get(export_url, timeout=10)
             if res.status_code == 200 and len(res.text) > 50:
+                # Extract first line as title if possible
                 content = res.text[:5000]
+                first_line = content.split('\n')[0].strip()[:100]
                 return [NoteCreate(
-                    content=f"📄 Google Doc (imported)\n\n{content}",
+                    content=f"📄 Google Doc: {first_line}\n\n{content}",
                     tags=["gdrive", "document", "imported"]
                 )]
+        except Exception:
+            pass
+            
+        # Fallback: Try to scrape the public Drive URL with better headers
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+            }
+            res = requests.get(link, headers=headers, timeout=12)
+            if res.status_code == 200:
+                soup = BeautifulSoup(res.text, 'html.parser')
+                title = soup.title.string.strip() if soup.title else "Google Drive File"
+                title = title.replace(" - Google Drive", "").replace(" - Google Docs", "")
+                
+                # Try to find the main content div or just get all text
+                text = soup.get_text(separator=' ', strip=True)
+                text = IntegrationsService._clean_text(text)[:5000]
+                
+                if len(text) > 50:
+                    tags = IntegrationsService._extract_tags(text, ["gdrive", "imported"])
+                    return [NoteCreate(
+                        content=f"📁 Google Drive: {title}\nURL: {link}\n\n{text}",
+                        tags=tags
+                    )]
         except Exception:
             pass
         
@@ -195,12 +269,15 @@ class IntegrationsService:
         )]
 
     @staticmethod
-    async def sync_github(conn: asyncpg.Connection, neo4j_session, user_id: uuid.UUID, token: str) -> int:
+    async def sync_github(conn: asyncpg.Connection, user_id: uuid.UUID, token: str) -> int:
         loop = asyncio.get_event_loop()
         
         if IntegrationsService._is_github_url(token):
             # User provided a repo URL
             notes = await loop.run_in_executor(None, IntegrationsService._fetch_github_repo_by_url, token)
+            # Fallback for generic github URLs
+            if not notes:
+                notes = await loop.run_in_executor(None, IntegrationsService._fetch_generic_web_content, token, "github")
         else:
             # User provided a PAT token
             repos_notes = await loop.run_in_executor(None, IntegrationsService._fetch_github_repos_by_token, token)
@@ -208,17 +285,17 @@ class IntegrationsService:
             notes = repos_notes + gists_notes
         
         for note in notes:
-            await NotesService.create_note(conn, neo4j_session, user_id, note)
+            await NotesService.create_note(conn, user_id, note)
             
         await IntegrationsService.update_sync_time(conn, user_id, "github")
         return len(notes)
 
     @staticmethod
-    async def sync_gdrive(conn: asyncpg.Connection, neo4j_session, user_id: uuid.UUID, link: str) -> int:
+    async def sync_gdrive(conn: asyncpg.Connection, user_id: uuid.UUID, link: str) -> int:
         loop = asyncio.get_event_loop()
         notes = await loop.run_in_executor(None, IntegrationsService._fetch_gdrive_content, link)
         for note in notes:
-            await NotesService.create_note(conn, neo4j_session, user_id, note)
+            await NotesService.create_note(conn, user_id, note)
         await IntegrationsService.update_sync_time(conn, user_id, "gdrive")
         return len(notes)
 
@@ -265,7 +342,7 @@ class IntegrationsService:
             
             return [NoteCreate(
                 content=f"📝 Notion: {title}\nSource: {link}\n\n{text}",
-                tags=["notion", "imported", "document"]
+                tags=IntegrationsService._extract_tags(text, ["notion", "imported", "document"])
             )]
         except Exception as e:
             return [NoteCreate(
@@ -274,33 +351,77 @@ class IntegrationsService:
             )]
 
     @staticmethod
-    async def sync_notion(conn: asyncpg.Connection, neo4j_session, user_id: uuid.UUID, link: str) -> int:
+    async def sync_notion(conn: asyncpg.Connection, user_id: uuid.UUID, link: str) -> int:
         loop = asyncio.get_event_loop()
         notes = await loop.run_in_executor(None, IntegrationsService._fetch_notion_content, link)
         for note in notes:
-            await NotesService.create_note(conn, neo4j_session, user_id, note)
+            await NotesService.create_note(conn, user_id, note)
         await IntegrationsService.update_sync_time(conn, user_id, "notion")
         return len(notes)
 
     @staticmethod
-    async def trigger_sync(conn: asyncpg.Connection, neo4j_session, user_id: uuid.UUID, platform: str) -> int:
+    def _fetch_generic_web_content(link: str, tag: str = "web") -> List[NoteCreate]:
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            }
+            res = requests.get(link, headers=headers, timeout=15, allow_redirects=True)
+            if res.status_code == 200:
+                soup = BeautifulSoup(res.text, 'html.parser')
+                
+                # Better content extraction: remove junk
+                for element in soup(["script", "style", "nav", "footer", "header", "aside"]):
+                    element.decompose()
+                
+                title = soup.title.string.strip() if soup.title and soup.title.string else "Web Page"
+                
+                # Try to get meta description as well
+                meta_desc = soup.find('meta', attrs={'name': 'description'})
+                desc_text = meta_desc['content'] if meta_desc and meta_desc.get('content') else ""
+                
+                text = soup.get_text(separator='\n', strip=True)
+                text = IntegrationsService._clean_text(text)[:6000]
+                
+                if len(text) > 100:
+                    full_content = f"🌐 Scraped Page: {title}\nURL: {link}\n\nDescription: {desc_text}\n\n{text}"
+                    tags = IntegrationsService._extract_tags(text, [tag, "scraped"])
+                    return [NoteCreate(content=full_content, tags=tags)]
+        except Exception as e:
+            return [NoteCreate(
+                content=f"🌐 Web Link: {link}\n\n[Import failed: {str(e)[:100]}]\n[Link saved for reference]",
+                tags=[tag, "integration"]
+            )]
+        return []
+
+    @staticmethod
+    async def trigger_sync(conn: asyncpg.Connection, user_id: uuid.UUID, platform: str) -> int:
         token = await IntegrationsService.get_token(conn, user_id, platform)
         if not token:
             raise ValueError(f"No integration found for {platform}")
 
         if platform == "github":
-            return await IntegrationsService.sync_github(conn, neo4j_session, user_id, token)
+            return await IntegrationsService.sync_github(conn, user_id, token)
         elif platform == "gdrive":
-            return await IntegrationsService.sync_gdrive(conn, neo4j_session, user_id, token)
+            return await IntegrationsService.sync_gdrive(conn, user_id, token)
         elif platform == "notion":
-            return await IntegrationsService.sync_notion(conn, neo4j_session, user_id, token)
+            return await IntegrationsService.sync_notion(conn, user_id, token)
         else:
-            # Slack and future platforms
+            # Try generic web scraper for any other platform URLs
+            if token.startswith("http://") or token.startswith("https://"):
+                loop = asyncio.get_event_loop()
+                notes = await loop.run_in_executor(None, IntegrationsService._fetch_generic_web_content, token, platform)
+                if notes:
+                    for note in notes:
+                        await NotesService.create_note(conn, user_id, note)
+                    await IntegrationsService.update_sync_time(conn, user_id, platform)
+                    return len(notes)
+
+            # Slack and future platforms generic fallback
             note = NoteCreate(
                 content=f"📎 Connected to {platform}.\n\nSource: {token}\n\n[Integration active — content sync available for supported platforms]",
                 tags=[platform, "integration"]
             )
-            await NotesService.create_note(conn, neo4j_session, user_id, note)
+            await NotesService.create_note(conn, user_id, note)
             await IntegrationsService.update_sync_time(conn, user_id, platform)
             return 1
 

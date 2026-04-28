@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 import asyncpg
 import uuid
 from typing import List
-from app.deps.database import get_db_connection, get_neo4j_session
+from app.deps.database import get_db_connection
 from app.deps.auth import get_current_user
 from app.schemas.auth import UserResponse
 from app.schemas.integrations import IntegrationConnect, IntegrationResponse
@@ -32,14 +32,13 @@ async def get_integrations(
 async def connect_integration(
     data: IntegrationConnect,
     current_user: UserResponse = Depends(get_current_user),
-    conn: asyncpg.Connection = Depends(get_db_connection),
-    neo4j_session=Depends(get_neo4j_session)
+    conn: asyncpg.Connection = Depends(get_db_connection)
 ):
     try:
         await IntegrationsService.connect_integration(conn, current_user.id, data.platform, data.access_token)
         # Auto-sync immediately after connecting
         try:
-            synced = await IntegrationsService.trigger_sync(conn, neo4j_session, current_user.id, data.platform)
+            synced = await IntegrationsService.trigger_sync(conn, current_user.id, data.platform)
             return {"status": "success", "platform": data.platform, "synced_notes": synced}
         except Exception:
             return {"status": "success", "platform": data.platform, "synced_notes": 0}
@@ -68,11 +67,10 @@ async def disconnect_integration(
 async def sync_integration(
     platform: str,
     current_user: UserResponse = Depends(get_current_user),
-    conn: asyncpg.Connection = Depends(get_db_connection),
-    neo4j_session=Depends(get_neo4j_session)
+    conn: asyncpg.Connection = Depends(get_db_connection)
 ):
     try:
-        synced_count = await IntegrationsService.trigger_sync(conn, neo4j_session, current_user.id, platform)
+        synced_count = await IntegrationsService.trigger_sync(conn, current_user.id, platform)
         return SyncResponse(message=f"Successfully synced {synced_count} items from {platform}", synced_notes=synced_count)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))

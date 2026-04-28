@@ -1,4 +1,4 @@
-﻿services:
+services:
   # Postgres with pgvector
   db:
     image: pgvector/pgvector:pg16
@@ -16,20 +16,7 @@
       timeout: 5s
       retries: 5
 
-  # Neo4j
-  neo4j:
-    image: neo4j:5
-    environment:
-      NEO4J_AUTH: neo4j/sbneo4jpass
-    ports: ["7474:7474", "7687:7687"]
-    volumes:
-      - ./infra/neo4j/data:/data
-      - ./infra/neo4j/logs:/logs
-    healthcheck:
-      test: ["CMD-SHELL", "cypher-shell -u neo4j -p sbneo4jpass 'RETURN 1'"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+
 
   # API Gateway
   api:
@@ -37,14 +24,9 @@
     ports: ["8000:80"]
     environment:
       - DB_URL=postgresql://sb:sbpass@db:5432/sbdb
-      - NEO4J_URL=bolt://neo4j:7687
-      - NEO4J_USER=neo4j
-      - NEO4J_PASSWORD=sbneo4jpass
       - SECRET_KEY=your-secret-key-change-in-production
     depends_on:
       db:
-        condition: service_started
-      neo4j:
         condition: service_started
     restart: unless-stopped
 

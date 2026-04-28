@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import List, Dict, Any
-from app.deps.database import get_neo4j_session
+import asyncpg
+from app.deps.database import get_db_connection
 from app.deps.auth import get_current_user
 from app.schemas.auth import UserResponse
 from app.schemas.graph import IdeaCreate, TagAdd, LinkIdeas
@@ -8,128 +9,95 @@ from app.schemas.graph import IdeaCreate, TagAdd, LinkIdeas
 router = APIRouter(prefix="/graph", tags=["graph"])
 
 @router.post("/idea")
-async def create_idea(data: IdeaCreate, current_user: UserResponse = Depends(get_current_user), session = Depends(get_neo4j_session)):
-    q = '''
-    MERGE (i:Idea {id:$id})
-    SET i.title = $title, i.user_id = $uid
-    RETURN i.id AS id
-    '''
-    try:
-        result = await session.run(q, id=data.id, title=data.title, uid=str(current_user.id))
-        rec = await result.single()
-        return {"id": rec["id"]}
-    except Exception as e:
-        raise HTTPException(500, f"Error creating idea: {e}")
+async def create_idea(data: IdeaCreate, current_user: UserResponse = Depends(get_current_user), conn: asyncpg.Connection = Depends(get_db_connection)):
+    # Handled by notes creation
+    return {"id": data.id}
 
 @router.post("/tag")
-async def add_tag(data: TagAdd, current_user: UserResponse = Depends(get_current_user), session = Depends(get_neo4j_session)):
-    q = '''
-    MATCH (i:Idea {id:$id, user_id:$uid})
-    MERGE (t:Tag {name:$tag})
-    MERGE (i)-[:TAGGED_WITH]->(t)
-    RETURN i.id AS id, t.name AS tag
-    '''
-    try:
-        result = await session.run(q, id=data.idea_id, tag=data.tag, uid=str(current_user.id))
-        rec = await result.single()
-        return {"id": rec["id"] if rec else None, "tag": rec["tag"] if rec else None}
-    except Exception as e:
-        raise HTTPException(500, f"Error tagging idea: {e}")
+async def add_tag(data: TagAdd, current_user: UserResponse = Depends(get_current_user), conn: asyncpg.Connection = Depends(get_db_connection)):
+    # Handled by notes creation
+    return {"id": data.idea_id, "tag": data.tag}
 
 @router.post("/link")
-async def link_ideas(data: LinkIdeas, current_user: UserResponse = Depends(get_current_user), session = Depends(get_neo4j_session)):
-    q = '''
-    MATCH (a:Idea {id:$src, user_id:$uid}), (b:Idea {id:$dst, user_id:$uid})
-    MERGE (a)-[:LINKED_TO]->(b)
-    RETURN a.id AS src, b.id AS dst
-    '''
+async def link_ideas(data: LinkIdeas, current_user: UserResponse = Depends(get_current_user), conn: asyncpg.Connection = Depends(get_db_connection)):
     try:
-        result = await session.run(q, src=data.src_id, dst=data.dst_id, uid=str(current_user.id))
-        rec = await result.single()
-        return {"src": rec["src"] if rec else None, "dst": rec["dst"] if rec else None}
+        query = '''
+            INSERT INTO note_links (src_id, dst_id) 
+            VALUES ($1, $2) ON CONFLICT DO NOTHING
+        '''
+        await conn.execute(query, data.src_id, data.dst_id)
+        return {"src": data.src_id, "dst": data.dst_id}
     except Exception as e:
         raise HTTPException(500, f"Error linking ideas: {e}")
 
 @router.get("/neighbors")
-async def neighbors(idea_id: str, depth: int = Query(2, ge=1, le=4), current_user: UserResponse = Depends(get_current_user), session = Depends(get_neo4j_session)):
-    q = f"""
-    MATCH (i:Idea {{id:$id, user_id:$uid}})-[:LINKED_TO|TAGGED_WITH*1..{depth}]-(n)
-    WITH DISTINCT n
-    RETURN labels(n) AS labels, n.id AS id LIMIT 100
-    """
-    try:
-        result = await session.run(q, id=idea_id, uid=str(current_user.id))
-        records = await result.data()
-        return {"count": len(records), "nodes": records}
-    except Exception as e:
-        raise HTTPException(500, f"Error reading neighbors: {e}")
+async def neighbors(idea_id: str, depth: int = Query(2, ge=1, le=4), current_user: UserResponse = Depends(get_current_user), conn: asyncpg.Connection = Depends(get_db_connection)):
+    # Placeholder for PostgreSQL graph traversal if needed by UI
+    return {"count": 0, "nodes": []}
 
 @router.get("/shortest_path")
-async def shortest_path(src_id: str, dst_id: str, current_user: UserResponse = Depends(get_current_user), session = Depends(get_neo4j_session)):
-    q = '''
-    MATCH (a:Idea {id:$src, user_id:$uid}), (b:Idea {id:$dst, user_id:$uid}),
-          p = shortestPath((a)-[:LINKED_TO*..5]-(b))
-    RETURN [n IN nodes(p) | n.id] AS path
-    '''
-    try:
-        result = await session.run(q, src=src_id, dst=dst_id, uid=str(current_user.id))
-        rec = await result.single()
-        return {"path": rec["path"] if rec and rec["path"] is not None else []}
-    except Exception as e:
-        raise HTTPException(500, f"Error computing shortest path: {e}")
+async def shortest_path(src_id: str, dst_id: str, current_user: UserResponse = Depends(get_current_user), conn: asyncpg.Connection = Depends(get_db_connection)):
+    # Placeholder for PostgreSQL graph traversal if needed by UI
+    return {"path": []}
 
 @router.get("/all")
 async def get_all_graph(
     current_user: UserResponse = Depends(get_current_user),
-    session = Depends(get_neo4j_session)
+    conn: asyncpg.Connection = Depends(get_db_connection)
 ):
     """Fetch nodes and edges for frontend graph visualization"""
     try:
-        # Use elementId() for Neo4j 5.x (AuraDB) compatibility
-        # Fully consume result with .data() before running second query
-        nodes_result = await session.run(
-            """
-            MATCH (i:Idea {user_id: $uid})
-            OPTIONAL MATCH (i)-[r]-(t:Tag)
-            WITH collect(i) + collect(t) as raw_nodes
-            UNWIND raw_nodes as n
-            WITH DISTINCT n WHERE n IS NOT NULL
-            RETURN elementId(n) as internal_id, labels(n)[0] as label,
-                   n.id as id, n.title as title, n.name as name
-            LIMIT 300
-            """,
-            uid=str(current_user.id)
-        )
-        nodes_data = await nodes_result.data()
-        nodes = [
-            {
-                "internal_id": rec["internal_id"],
-                "label": rec["label"],
-                "id": rec["id"],
-                "title": rec["title"] or rec["name"]
-            }
-            for rec in nodes_data
-        ]
+        nodes = []
+        edges = []
+        
+        # Fetch all notes
+        notes_records = await conn.fetch("SELECT id, content, tags, created_at FROM notes WHERE user_id = $1 LIMIT 500", current_user.id)
+        
+        tags_set = set()
+        for r in notes_records:
+            nid = str(r['id'])
+            content = r['content'] or ''
+            title = content[:50] + "..." if len(content) > 50 else content
+            title = title or "Untitled Idea"
+            
+            nodes.append({
+                "internal_id": nid,
+                "label": "Idea",
+                "id": nid,
+                "title": title,
+                "content": content,
+                "created_at": r['created_at'].isoformat() if r['created_at'] else None
+            })
+            
+            if r['tags']:
+                for tag in r['tags']:
+                    if not tag: continue
+                    if tag not in tags_set:
+                        tags_set.add(tag)
+                        nodes.append({
+                            "internal_id": tag,
+                            "label": "Tag",
+                            "id": tag,
+                            "title": tag
+                        })
+                    
+                    edges.append({
+                        "source": nid,
+                        "target": tag,
+                        "type": "TAGGED_WITH"
+                    })
 
-        # Second query only after first is fully consumed
-        edges_result = await session.run(
-            """
-            MATCH (a:Idea {user_id: $uid})-[r]-(b)
-            RETURN elementId(a) as source, elementId(b) as target, type(r) as type
-            LIMIT 500
-            """,
-            uid=str(current_user.id)
-        )
-        edges_data = await edges_result.data()
-        edges = [
-            {
-                "source": rec["source"],
-                "target": rec["target"],
-                "type": rec["type"]
-            }
-            for rec in edges_data
-        ]
+        # Fetch explicit links
+        links_records = await conn.fetch("SELECT src_id, dst_id FROM note_links INNER JOIN notes ON notes.id = note_links.src_id WHERE notes.user_id = $1 LIMIT 500", current_user.id)
+        for r in links_records:
+            edges.append({
+                "source": str(r['src_id']),
+                "target": str(r['dst_id']),
+                "type": "LINKED_TO"
+            })
 
         return {"nodes": nodes, "edges": edges}
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(500, f"Error fetching graph data: {e}")

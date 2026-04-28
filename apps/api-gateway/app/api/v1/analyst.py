@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 import asyncpg
 from pydantic import BaseModel
 from typing import List, Optional
-from app.deps.database import get_db_connection, get_neo4j_session
+from app.deps.database import get_db_connection
 from app.deps.auth import get_current_user
 from app.schemas.auth import UserResponse
 from collections import Counter
@@ -10,6 +10,8 @@ import time
 import re
 # Reuse the same HuggingFace API embedding helper from notes service
 from app.services.notes import get_embedding
+from app.core.config import settings
+import openai
 
 router = APIRouter(prefix="/analyst", tags=["analyst"])
 
@@ -270,8 +272,7 @@ def _generate_smart_answer(query: str, contexts: list, graph_data: list, total_n
 async def ask_analyst(
     request: AnalystQuery,
     current_user: UserResponse = Depends(get_current_user),
-    conn: asyncpg.Connection = Depends(get_db_connection),
-    neo4j_session = Depends(get_neo4j_session)
+    conn: asyncpg.Connection = Depends(get_db_connection)
 ):
     """Local AI Data Analyst — semantic vector search + knowledge graph + smart RAG"""
     start = time.time()
@@ -298,27 +299,28 @@ async def ask_analyst(
             'similarity': float(row['similarity_score']) if row['similarity_score'] else 0.0
         })
     
-    # 2. Knowledge graph traversal
+    # 2. Knowledge graph traversal (using PostgreSQL tags)
     graph_nodes = []
     try:
-        q = """
-        MATCH (i:Idea {user_id: $uid})
-        OPTIONAL MATCH (i)-[r]-(t:Tag)
-        WITH collect(i) + collect(t) as raw_nodes
-        UNWIND raw_nodes as n
-        WITH DISTINCT n
-        WHERE n IS NOT NULL
-        RETURN id(n) as internal_id, labels(n)[0] as label, n.id as id, n.title as title, n.name as name
-        LIMIT 50
-        """
-        result = await neo4j_session.run(q, uid=str(current_user.id))
-        async for rec in result:
+        # Notes
+        nodes_records = await conn.fetch("SELECT id, content, tags FROM notes WHERE user_id = $1 LIMIT 50", current_user.id)
+        tags_set = set()
+        for r in nodes_records:
+            nid = str(r['id'])
+            content = r['content'] or ''
+            title = content[:50] + "..." if len(content) > 50 else content
+            title = title or "Untitled Idea"
             graph_nodes.append({
-                'internal_id': rec['internal_id'],
-                'label': rec['label'],
-                'id': rec['id'],
-                'title': rec['title'] or rec['name']
+                'internal_id': nid, 'label': 'Idea', 'id': nid, 'title': title
             })
+            if r['tags']:
+                for tag in r['tags']:
+                    if not tag: continue
+                    if tag not in tags_set:
+                        tags_set.add(tag)
+                        graph_nodes.append({
+                            'internal_id': tag, 'label': 'Tag', 'id': tag, 'title': tag
+                        })
     except Exception:
         pass
 
@@ -329,7 +331,36 @@ async def ask_analyst(
     total_notes = count_row['cnt'] if count_row else 0
     
     # 4. Generate smart local answer
-    answer = _generate_smart_answer(request.query, contexts, graph_nodes, total_notes)
+    if settings.openai_api_key:
+        try:
+            client = openai.AsyncOpenAI(api_key=settings.openai_api_key)
+            
+            # Prepare context for LLM
+            context_text = "\n".join([f"Note (Tags: {', '.join(c['tags'])}):\n{c['content']}" for c in contexts[:5]])
+            graph_text = "\n".join([f"Related Node: {n['label']} - {n['title']}" for n in graph_nodes[:10]])
+            
+            prompt = f"""You are the user's AI Second Brain Data Analyst. Answer their query based primarily on the provided context notes and knowledge graph connections from their personal knowledge base.
+
+User Query: "{request.query}"
+
+Relevant Notes Context:
+{context_text}
+
+Related Knowledge Graph Nodes:
+{graph_text}
+
+Generate a concise, insightful markdown-formatted answer. If the context doesn't have the exact answer, summarize what is available and state what is missing."""
+            
+            response = await client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[{"role": "system", "content": prompt}]
+            )
+            answer = response.choices[0].message.content
+        except Exception as e:
+            # Fallback to local heuristic generation if OpenAI fails
+            answer = f"*Note: OpenAI integration failed ({str(e)}), using local analyzer fallback.*\n\n" + _generate_smart_answer(request.query, contexts, graph_nodes, total_notes)
+    else:
+        answer = _generate_smart_answer(request.query, contexts, graph_nodes, total_notes)
     
     processing_time = (time.time() - start) * 1000
     
@@ -355,8 +386,7 @@ async def ask_analyst(
 @router.get("/stats")
 async def analyst_stats(
     current_user: UserResponse = Depends(get_current_user),
-    conn: asyncpg.Connection = Depends(get_db_connection),
-    neo4j_session = Depends(get_neo4j_session)
+    conn: asyncpg.Connection = Depends(get_db_connection)
 ):
     """Get knowledge base statistics"""
     notes_count = await conn.fetchrow(
@@ -370,17 +400,13 @@ async def analyst_stats(
     
     graph_stats = {'ideas': 0, 'tags': 0, 'connections': 0}
     try:
-        ideas_res = await neo4j_session.run("MATCH (i:Idea {user_id: $uid}) RETURN count(i) as c", uid=str(current_user.id))
-        ideas_rec = await ideas_res.single()
-        graph_stats['ideas'] = ideas_rec['c'] if ideas_rec else 0
-        
-        tags_res = await neo4j_session.run("MATCH (i:Idea {user_id: $uid})-[r]-(t:Tag) RETURN count(DISTINCT t) as c", uid=str(current_user.id))
-        tags_rec = await tags_res.single()
-        graph_stats['tags'] = tags_rec['c'] if tags_rec else 0
-        
-        edges_res = await neo4j_session.run("MATCH (i:Idea {user_id: $uid})-[r]-() RETURN count(r) as c", uid=str(current_user.id))
-        edges_rec = await edges_res.single()
-        graph_stats['connections'] = edges_rec['c'] if edges_rec else 0
+        ideas_count = notes_count['cnt'] if notes_count else 0
+        tags_count = await conn.fetchval(
+            "SELECT COUNT(DISTINCT tag) FROM (SELECT unnest(tags) as tag FROM notes WHERE user_id = $1) t", current_user.id
+        )
+        graph_stats['ideas'] = ideas_count
+        graph_stats['tags'] = tags_count or 0
+        graph_stats['connections'] = (tags_count or 0)
     except Exception:
         pass
     

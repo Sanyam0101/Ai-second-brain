@@ -29,7 +29,7 @@ def get_embedding(text: str) -> list:
 
 class NotesService:
     @staticmethod
-    async def create_note(conn: asyncpg.Connection, neo4j_session, user_id: uuid.UUID, note_data: NoteCreate) -> NoteResponse:
+    async def create_note(conn: asyncpg.Connection, user_id: uuid.UUID, note_data: NoteCreate) -> NoteResponse:
         # Generate embedding via HuggingFace API
         embedding = get_embedding(note_data.content)
         # HF API returns a plain list, no .tolist() needed
@@ -49,18 +49,7 @@ class NotesService:
             embedding_str
         )
         
-        # Sync to Neo4j
-        note_id_str = str(row['id'])
-        title = note_data.content[:40] + "..." if len(note_data.content) > 40 else note_data.content
-        await neo4j_session.run('MERGE (i:Idea {id: $id}) SET i.title = $title, i.user_id = $uid', id=note_id_str, title=title, uid=str(user_id))
-        
-        for tag in note_data.tags:
-            q_tag = '''
-            MATCH (i:Idea {id:$id})
-            MERGE (t:Tag {name:$tag})
-            MERGE (i)-[:TAGGED_WITH]->(t)
-            '''
-            await neo4j_session.run(q_tag, id=note_id_str, tag=tag)
+        # Note: Neo4j integration removed to reduce memory footprint
             
         return NoteResponse(
             id=row['id'],
@@ -145,7 +134,6 @@ class NotesService:
     @staticmethod
     async def update_note(
         conn: asyncpg.Connection, 
-        neo4j_session,
         note_id: uuid.UUID, 
         user_id: uuid.UUID, 
         note_data: NoteUpdate
@@ -196,22 +184,7 @@ class NotesService:
         if not row:
             return None
         
-        if note_data.content is not None:
-            # Update title in neo4j
-            title = note_data.content[:40] + "..." if len(note_data.content) > 40 else note_data.content
-            await neo4j_session.run('MATCH (i:Idea {id: $id}) SET i.title = $title', id=str(note_id), title=title)
-
-        if note_data.tags is not None:
-            # Rebuild tags
-            q_clear_tags = 'MATCH (i:Idea {id:$id})-[r:TAGGED_WITH]->() DELETE r'
-            await neo4j_session.run(q_clear_tags, id=str(note_id))
-            for tag in note_data.tags:
-                q_tag = '''
-                MATCH (i:Idea {id:$id})
-                MERGE (t:Tag {name:$tag})
-                MERGE (i)-[:TAGGED_WITH]->(t)
-                '''
-                await neo4j_session.run(q_tag, id=str(note_id), tag=tag)
+        # Note: Neo4j integration removed
 
         return NoteResponse(
             id=row['id'],
@@ -222,7 +195,7 @@ class NotesService:
         )
     
     @staticmethod
-    async def delete_note(conn: asyncpg.Connection, neo4j_session, note_id: uuid.UUID, user_id: uuid.UUID) -> bool:
+    async def delete_note(conn: asyncpg.Connection, note_id: uuid.UUID, user_id: uuid.UUID) -> bool:
         """Delete a note"""
         query = '''
             DELETE FROM notes 
@@ -231,7 +204,6 @@ class NotesService:
         '''
         result = await conn.fetchrow(query, note_id, user_id)
         if result is not None:
-            # Delete from Neo4j
-            await neo4j_session.run('MATCH (i:Idea {id:$id}) DETACH DELETE i', id=str(note_id))
+            # Note: Neo4j integration removed
             return True
         return False
